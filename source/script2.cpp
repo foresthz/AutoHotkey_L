@@ -11477,14 +11477,20 @@ VarSizeType BIV_OSVersion(LPTSTR aBuf, LPTSTR aVarName)
 	LPCTSTR version = _T("");  // Init for maintainability.
 	if (g_os.IsWinNT()) // "NT" includes all NT-kernel OSes: NT4/2000/XP/2003/Vista/7/8/etc.
 	{
-		if (g_os.IsWinXP())
+		if (g_os.MajorVersion() == 6)
+		{
+			switch (g_os.MinorVersion())
+			{
+			// Easier to handle them here directly than in os_version:
+			case 1: version = _T("WIN_7"); break;
+			case 2: version = _T("WIN_8"); break;
+			case 3: version = _T("WIN_8.1"); break;
+			case 4: version = _T("WIN_10"); break;
+			case 0: version = _T("WIN_VISTA"); break;
+			}
+		}
+		else if (g_os.IsWinXP())
 			version = _T("WIN_XP");
-		else if (g_os.IsWin7())
-			version = _T("WIN_7");
-		else if (g_os.IsWin8_1())
-			version = _T("WIN_8.1");
-		else if (g_os.IsWin8())
-			version = _T("WIN_8");
 		else if (g_os.IsWinVista())
 			version = _T("WIN_VISTA");
 		else if (g_os.IsWin2003())
