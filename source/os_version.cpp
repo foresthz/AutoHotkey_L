@@ -147,8 +147,7 @@ void OS_Version::Init(void)
 	m_bWinXP	= false;	m_bWinXPorLater		= false;
 	m_bWin2003  = false;
 	m_bWinVista = false;	m_bWinVistaOrLater	= false;
-	m_bWin7		= false;	m_bWin7OrLater		= false;
-	m_bWin8		= false;
+	m_bWin7OrLater		= false;
 
 #ifdef CONFIG_WIN9X
 	// Work out if NT or 9x
@@ -187,15 +186,8 @@ void OS_Version::Init(void)
 			case 6:
 				if (m_dwMinorVersion == 0)
 					m_bWinVista = true;
-				else {
+				else
 					m_bWin7OrLater = true;
-					if (m_dwMinorVersion == 1)
-						m_bWin7 = true;
-					else if (m_dwMinorVersion == 2)
-						m_bWin8 = true;
-					else if (m_dwMinorVersion == 3)
-						m_bWin8_1 = true;
-				}
 				m_bWinVistaOrLater = true;
 				m_bWinXPorLater = true;
 				m_bWin2000orLater = true;

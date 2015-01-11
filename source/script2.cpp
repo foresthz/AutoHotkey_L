@@ -633,7 +633,10 @@ ResultType Line::Splash(LPTSTR aOptions, LPTSTR aSubText, LPTSTR aMainText, LPTS
 			small_icon = (LPARAM)g_script.mCustomIconSmall; // Should always be non-NULL when mCustomIcon is non-NULL.
 		}
 		else
-			big_icon = small_icon = (LPARAM)LoadImage(g_hInstance, MAKEINTRESOURCE(IDI_MAIN), IMAGE_ICON, 0, 0, LR_SHARED); // Use LR_SHARED to conserve memory (since the main icon is loaded for so many purposes).
+		{
+			big_icon = (LPARAM)g_IconLarge;
+			small_icon = (LPARAM)g_IconSmall;
+		}
 
 		if (style & WS_SYSMENU)
 			SendMessage(splash.hwnd, WM_SETICON, ICON_SMALL, small_icon);
@@ -6030,7 +6033,10 @@ INT_PTR CALLBACK InputBoxProc(HWND hWndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
 			small_icon = (LPARAM)g_script.mCustomIconSmall; // Should always be non-NULL when mCustomIcon is non-NULL.
 		}
 		else
-			big_icon = small_icon = (LPARAM)LoadImage(g_hInstance, MAKEINTRESOURCE(IDI_MAIN), IMAGE_ICON, 0, 0, LR_SHARED); // Use LR_SHARED to conserve memory (since the main icon is loaded for so many purposes).
+		{
+			big_icon = (LPARAM)g_IconLarge;
+			small_icon = (LPARAM)g_IconSmall;
+		}
 
 		SendMessage(hWndDlg, WM_SETICON, ICON_SMALL, small_icon);
 		SendMessage(hWndDlg, WM_SETICON, ICON_BIG, big_icon);
@@ -11471,14 +11477,20 @@ VarSizeType BIV_OSVersion(LPTSTR aBuf, LPTSTR aVarName)
 	LPCTSTR version = _T("");  // Init for maintainability.
 	if (g_os.IsWinNT()) // "NT" includes all NT-kernel OSes: NT4/2000/XP/2003/Vista/7/8/etc.
 	{
-		if (g_os.IsWinXP())
+		if (g_os.MajorVersion() == 6)
+		{
+			switch (g_os.MinorVersion())
+			{
+			// Easier to handle them here directly than in os_version:
+			case 1: version = _T("WIN_7"); break;
+			case 2: version = _T("WIN_8"); break;
+			case 3: version = _T("WIN_8.1"); break;
+			case 4: version = _T("WIN_10"); break;
+			case 0: version = _T("WIN_VISTA"); break;
+			}
+		}
+		else if (g_os.IsWinXP())
 			version = _T("WIN_XP");
-		else if (g_os.IsWin7())
-			version = _T("WIN_7");
-		else if (g_os.IsWin8_1())
-			version = _T("WIN_8.1");
-		else if (g_os.IsWin8())
-			version = _T("WIN_8");
 		else if (g_os.IsWinVista())
 			version = _T("WIN_VISTA");
 		else if (g_os.IsWin2003())
@@ -12400,6 +12412,7 @@ VarSizeType BIV_TimeIdle(LPTSTR aBuf, LPTSTR aVarName) // Called by multiple cal
 {
 	if (!aBuf) // IMPORTANT: Conservative estimate because tick might change between 1st & 2nd calls.
 		return MAX_INTEGER_LENGTH;
+#ifdef CONFIG_WIN9X
 	*aBuf = '\0';  // Set default.
 	if (g_os.IsWin2000orLater()) // Checked in case the function is present in the OS but "not implemented".
 	{
@@ -12415,6 +12428,15 @@ VarSizeType BIV_TimeIdle(LPTSTR aBuf, LPTSTR aVarName) // Called by multiple cal
 				ITOA64(GetTickCount() - lii.dwTime, aBuf);
 		}
 	}
+#else
+	// Not Win9x: Calling it directly should (in theory) produce smaller code size.
+	LASTINPUTINFO lii;
+	lii.cbSize = sizeof(lii);
+	if (GetLastInputInfo(&lii))
+		ITOA64(GetTickCount() - lii.dwTime, aBuf);
+	else
+		*aBuf = '\0';
+#endif
 	return (VarSizeType)_tcslen(aBuf);
 }
 
