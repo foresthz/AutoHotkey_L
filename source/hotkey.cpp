@@ -864,10 +864,7 @@ void Hotkey::PerformInNewThreadMadeByCaller(HotkeyVariant &aVariant)
 
 	// LAUNCH HOTKEY SUBROUTINE:
 	++aVariant.mExistingThreads;  // This is the thread count for this particular hotkey only.
-	ResultType result;
-	DEBUGGER_STACK_PUSH(g_script.mThisHotkeyName)
-	result = aVariant.mJumpToLabel->Execute();
-	DEBUGGER_STACK_POP()
+	ResultType result = aVariant.mJumpToLabel->ExecuteInNewThread(g_script.mThisHotkeyName);
 	--aVariant.mExistingThreads;
 
 #ifdef CONFIG_WIN9X
@@ -902,7 +899,7 @@ void Hotkey::PerformInNewThreadMadeByCaller(HotkeyVariant &aVariant)
 
 
 
-ResultType Hotkey::Dynamic(LPTSTR aHotkeyName, LPTSTR aLabelName, LPTSTR aOptions, Label *aJumpToLabel)
+ResultType Hotkey::Dynamic(LPTSTR aHotkeyName, LPTSTR aLabelName, LPTSTR aOptions, IObject *aJumpToLabel)
 // Creates, updates, enables, or disables a hotkey dynamically (while the script is running).
 // Returns OK or FAIL.
 {
@@ -965,7 +962,7 @@ ResultType Hotkey::Dynamic(LPTSTR aHotkeyName, LPTSTR aLabelName, LPTSTR aOption
 	HookActionType hook_action = 0; // Set default.
 	if (!aJumpToLabel) // It wasn't provided by caller (resolved at load-time).
 		if (   !(hook_action = ConvertAltTab(aLabelName, true))   )
-			if (   *aLabelName && !(aJumpToLabel = g_script.FindLabel(aLabelName))   )
+			if (   *aLabelName && !(aJumpToLabel = g_script.FindCallable(aLabelName))   )
 				RETURN_HOTKEY_ERROR(HOTKEY_EL_BADLABEL, ERR_NO_LABEL, aLabelName);
 	// Above has ensured that aJumpToLabel and hook_action can't both be non-zero.  Furthermore,
 	// both can be zero/NULL only when the caller is updating an existing hotkey to have new options
@@ -1067,7 +1064,7 @@ ResultType Hotkey::Dynamic(LPTSTR aHotkeyName, LPTSTR aLabelName, LPTSTR aOption
 						// v1.0.42: However, this only needs to be done if Suspend is currently turned on,
 						// since otherwise the change in exempt status can't change whether this variant is
 						// currently in effect.
-						if (variant->mEnabled && g_IsSuspended && aJumpToLabel->IsExemptFromSuspend() != variant->mJumpToLabel->IsExemptFromSuspend())
+						if (variant->mEnabled && g_IsSuspended && LabelPtr(aJumpToLabel)->IsExemptFromSuspend() != variant->mJumpToLabel->IsExemptFromSuspend())
 							update_all_hotkeys = true;
 						variant->mJumpToLabel = aJumpToLabel; // Must be done only after the above has finished using the old mJumpToLabel.
 						// Older comment:
@@ -1215,7 +1212,7 @@ ResultType Hotkey::Dynamic(LPTSTR aHotkeyName, LPTSTR aLabelName, LPTSTR aOption
 
 
 
-Hotkey *Hotkey::AddHotkey(Label *aJumpToLabel, HookActionType aHookAction, LPTSTR aName, bool aSuffixHasTilde, bool aUseErrorLevel)
+Hotkey *Hotkey::AddHotkey(IObject *aJumpToLabel, HookActionType aHookAction, LPTSTR aName, bool aSuffixHasTilde, bool aUseErrorLevel)
 // Caller provides aJumpToLabel rather than a Line* because at the time a hotkey or hotstring
 // is created, the label's destination line is not yet known.  So the label is used a placeholder.
 // Caller must ensure that either aJumpToLabel or aName is not NULL.
@@ -1235,7 +1232,7 @@ Hotkey *Hotkey::AddHotkey(Label *aJumpToLabel, HookActionType aHookAction, LPTST
 	if (!shk[sNextID]->mConstructedOK)
 	{
 		delete shk[sNextID];  // SimpleHeap allows deletion of most recently added item.
-		return NULL;  // The constructor already displayed the error (or updated ErrorLevelevel).
+		return NULL;  // The constructor already displayed the error (or updated ErrorLevel).
 	}
 	++sNextID;
 	return shk[sNextID - 1]; // Indicate success by returning the new hotkey.
@@ -1243,7 +1240,7 @@ Hotkey *Hotkey::AddHotkey(Label *aJumpToLabel, HookActionType aHookAction, LPTST
 
 
 
-Hotkey::Hotkey(HotkeyIDType aID, Label *aJumpToLabel, HookActionType aHookAction, LPTSTR aName
+Hotkey::Hotkey(HotkeyIDType aID, IObject *aJumpToLabel, HookActionType aHookAction, LPTSTR aName
 	, bool aSuffixHasTilde, bool aUseErrorLevel)
 // Constructor.
 // Caller provides aJumpToLabel rather than a Line* because at the time a hotkey or hotstring
@@ -1289,7 +1286,7 @@ Hotkey::Hotkey(HotkeyIDType aID, Label *aJumpToLabel, HookActionType aHookAction
 		return;
 	}
 
-	LPTSTR hotkey_name = aName ? aName : aJumpToLabel->mName;
+	LPTSTR hotkey_name = aName;
 	if (!TextInterpret(hotkey_name, this, aUseErrorLevel)) // The called function already displayed the error.
 		return;
 
@@ -1590,7 +1587,7 @@ HotkeyVariant *Hotkey::FindVariant()
 
 
 
-HotkeyVariant *Hotkey::AddVariant(Label *aJumpToLabel, bool aSuffixHasTilde)
+HotkeyVariant *Hotkey::AddVariant(IObject *aJumpToLabel, bool aSuffixHasTilde)
 // Returns NULL upon out-of-memory; otherwise, the address of the new variant.
 // Even if aJumpToLabel is NULL, a non-NULL mJumpToLabel will be stored in each variant so that
 // NULL doesn't have to be constantly checked during script runtime.
@@ -1684,8 +1681,8 @@ ResultType Hotkey::TextInterpret(LPTSTR aName, Hotkey *aThisHotkey, bool aUseErr
 	*end_of_term1 = '\0';
 	ResultType result = TextToKey(term1, aName, true, aThisHotkey, aUseErrorLevel);
 	*end_of_term1 = ctemp;  // Undo the termination.
-	if (result == FAIL)
-		return FAIL;
+	if (result != OK)
+		return result;
 	term2 += COMPOSITE_DELIMITER_LENGTH;
 	term2 = omit_leading_whitespace(term2);
 	// Even though modifiers on keys already modified by a mModifierVK are not supported, call
@@ -1923,15 +1920,13 @@ ResultType Hotkey::TextToKey(LPTSTR aText, LPTSTR aHotkeyName, bool aIsModifier,
 					g_ErrorLevel->Assign(HOTKEY_EL_UNSUPPORTED_PREFIX);
 				else
 				{
-					// In this case, aThisHotkey is NOT checked because it seems better to yield a double
-					// syntax error at load-time (once for Hotkey failure and again for "unrecognized action"
-					// than to show only the generic error message.  Note that the Hotkey command (at runtime)
-					// also uses the below to show a single error dialog.
 					sntprintf(error_text, _countof(error_text), _T("\"%s\" is not allowed as a prefix key."), aText);
-					if (g_script.mIsReadyToExecute) // Dynamically registered via the Hotkey command.
-						g_script.ScriptError(error_text);
-					else
-						MsgBox(error_text);
+					g_script.ScriptError(error_text, aHotkeyName);
+					// When aThisHotkey==NULL, return CONDITION_FALSE to indicate to our caller that it's
+					// an invalid hotkey and we've already shown the error message.  Unlike the old method,
+					// this method respects /ErrorStdOut and avoids the second, generic error message.
+					if (!aThisHotkey)
+						return CONDITION_FALSE;
 				}
 				return FAIL;
 			}
@@ -1955,11 +1950,22 @@ ResultType Hotkey::TextToKey(LPTSTR aText, LPTSTR aHotkeyName, bool aIsModifier,
 			if (   !(temp_sc = (sc_type)ConvertJoy(aText, &joystick_id, true))   )  // Is there a joystick control/button?
 			{
 				if (aUseErrorLevel)
+				{
 					// Tempting to store the name of the invalid key in ErrorLevel, but because it might
 					// be really long, it seems best not to.  Another reason is that the keyname could
 					// conceivably be the same as one of the other/reserved ErrorLevel numbers.
 					g_ErrorLevel->Assign(HOTKEY_EL_INVALID_KEYNAME);
-				else if (aThisHotkey)
+					return FAIL;
+				}
+				if (!aText[1] && !g_script.mIsReadyToExecute)
+				{
+					// At load time, single-character key names are always considered valid but show a
+					// warning if they can't be registered as hotkeys on the current keyboard layout.
+					if (!aThisHotkey) // First stage: caller wants to differentiate this case from others.
+						return CONDITION_TRUE;
+					return FAIL; // Second stage: return FAIL to avoid creating an invalid hotkey.
+				}
+				if (aThisHotkey)
 				{
 					// If it fails while aThisHotkey!=NULL, that should mean that this was called as
 					// a result of the Hotkey command rather than at loadtime.  This is because at 
@@ -2380,9 +2386,7 @@ ResultType Hotstring::PerformInNewThreadMadeByCaller()
 	g_script.mThisHotkeyModifiersLR = 0;
 	++mExistingThreads;  // This is the thread count for this particular hotstring only.
 	ResultType result;
-	DEBUGGER_STACK_PUSH(g_script.mThisHotkeyName)
-	result = mJumpToLabel->Execute();
-	DEBUGGER_STACK_POP()
+	result = LabelPtr(mJumpToLabel)->ExecuteInNewThread(g_script.mThisHotkeyName);
 	--mExistingThreads;
 	return result ? OK : FAIL;	// Return OK on all non-failure results.
 }

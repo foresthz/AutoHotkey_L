@@ -64,11 +64,19 @@ enum ExecUntilMode {NORMAL_MODE, UNTIL_RETURN, UNTIL_BLOCK_END, ONLY_ONE_LINE};
 #define ATTR_LOOP_PARSE (void *)6
 #define ATTR_LOOP_WHILE (void *)7 // Lexikos: This is used to differentiate ACT_WHILE from ACT_LOOP, allowing code to be shared.
 #define ATTR_LOOP_FOR (void *)8
+#define ATTR_LOOP_NEW_REG (void *)9
+#define ATTR_LOOP_NEW_FILES (void *)10
 #define ATTR_LOOP_OBSCURED (void *)100 // fincs: used by Line::PreparseIfElse() for ACT_FINALLY blocks.
 #define ATTR_OBSCURE(attr) ((attr) ? ATTR_LOOP_OBSCURED : ATTR_NONE)
 typedef void *AttributeType;
 
-enum FileLoopModeType {FILE_LOOP_INVALID, FILE_LOOP_FILES_ONLY, FILE_LOOP_FILES_AND_FOLDERS, FILE_LOOP_FOLDERS_ONLY};
+typedef int FileLoopModeType;
+#define FILE_LOOP_INVALID		0
+#define FILE_LOOP_FILES_ONLY	1
+#define FILE_LOOP_FOLDERS_ONLY	2
+#define FILE_LOOP_RECURSE		4
+#define FILE_LOOP_FILES_AND_FOLDERS (FILE_LOOP_FILES_ONLY | FILE_LOOP_FOLDERS_ONLY)
+
 enum VariableTypeType {VAR_TYPE_INVALID, VAR_TYPE_NUMBER, VAR_TYPE_INTEGER, VAR_TYPE_FLOAT
 	, VAR_TYPE_TIME	, VAR_TYPE_DIGIT, VAR_TYPE_XDIGIT, VAR_TYPE_ALNUM, VAR_TYPE_ALPHA
 	, VAR_TYPE_UPPER, VAR_TYPE_LOWER, VAR_TYPE_SPACE};
@@ -181,6 +189,7 @@ enum CommandIDs {CONTROL_ID_FIRST = IDCANCEL + 1
 #define ERR_CATCH_WITH_NO_TRY _T("CATCH with no matching TRY")
 #define ERR_FINALLY_WITH_NO_PRECEDENT _T("FINALLY with no matching TRY or CATCH")
 #define ERR_BAD_JUMP_INSIDE_FINALLY _T("Jumps cannot exit a FINALLY block.")
+#define ERR_BAD_JUMP_OUT_OF_FUNCTION _T("Cannot jump from inside a function to outside.")
 #define ERR_EXPECTED_BLOCK_OR_ACTION _T("Expected \"{\" or single-line action.")
 #define ERR_OUTOFMEM _T("Out of memory.")  // Used by RegEx too, so don't change it without also changing RegEx to keep the former string.
 #define ERR_EXPR_TOO_LONG _T("Expression too long")
@@ -202,6 +211,7 @@ enum CommandIDs {CONTROL_ID_FIRST = IDCANCEL + 1
 #define ERR_INVALID_LINE_IN_PROPERTY_DEF _T("Not a valid property getter/setter.")
 #define ERR_INVALID_GUI_NAME _T("Invalid Gui name.")
 #define ERR_INVALID_OPTION _T("Invalid option.") // Generic message used by Gui and GuiControl/Get.
+#define ERR_EXCEPTION _T("An exception was thrown.")
 
 #define WARNING_USE_UNSET_VARIABLE _T("This variable has not been assigned a value.")
 #define WARNING_LOCAL_SAME_AS_GLOBAL _T("This local variable has the same name as a global variable.")
@@ -698,7 +708,7 @@ private:
 		, LPTSTR aExcludeTitle, LPTSTR aExcludeText);
 	ResultType ControlGet(LPTSTR aCommand, LPTSTR aValue, LPTSTR aControl, LPTSTR aTitle, LPTSTR aText
 		, LPTSTR aExcludeTitle, LPTSTR aExcludeText);
-	ResultType GuiControl(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3);
+	ResultType GuiControl(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3, Var *aParam3Var);
 	ResultType GuiControlGet(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3);
 	ResultType StatusBarGetText(LPTSTR aPart, LPTSTR aTitle, LPTSTR aText
 		, LPTSTR aExcludeTitle, LPTSTR aExcludeText);
@@ -1161,32 +1171,80 @@ public:
 		// \ * + = | : ; " ? ,
 		// The following is a list of illegal characters in a computer name:
 		// regEx.Pattern = "`|~|!|@|#|\$|\^|\&|\*|\(|\)|\=|\+|{|}|\\|;|:|'|<|>|/|\?|\||%"
+		return RegConvertKey(aBuf, REG_OLD_SYNTAX, NULL, aIsRemoteRegistry);
+	}
+	static HKEY RegConvertKey(LPTSTR aBuf, RegSyntax aSyntax, LPTSTR *aSubkey = NULL, bool *aIsRemoteRegistry = NULL)
+	{
+		const size_t COMPUTER_NAME_BUF_SIZE = 128;
 
-		LPTSTR colon_pos = _tcsrchr(aBuf, ':');
-		LPTSTR key_name = colon_pos ? omit_leading_whitespace(colon_pos + 1) : aBuf;
-		if (aIsRemoteRegistry) // Caller wanted the below put into the output parameter.
-			*aIsRemoteRegistry = (colon_pos != NULL);
-		HKEY root_key = NULL; // Set default.
+		LPTSTR key_name_pos = aBuf, computer_name_end = NULL;
+
+		if (aSyntax != REG_NEW_SYNTAX) // Legacy mode:  ComputerName:RootKey
+		{
+			if (computer_name_end = _tcsrchr(aBuf, ':'))
+			{
+				if ((computer_name_end - aBuf) >= COMPUTER_NAME_BUF_SIZE)
+					return NULL;
+				key_name_pos = omit_leading_whitespace(computer_name_end + 1);
+			}
+		}
+		if (aSyntax != REG_OLD_SYNTAX)
+		{
+			if (*aBuf == '\\' && aBuf[1] == '\\') // Something like \\ComputerName\HKLM.
+			{
+				if (  !(computer_name_end = _tcschr(aBuf + 2, '\\'))
+					|| (computer_name_end - aBuf) >= COMPUTER_NAME_BUF_SIZE  )
+					return NULL;
+				key_name_pos = computer_name_end + 1;
+			}
+		}
+
+		// Copy root key name into temporary buffer for use by _tcsicmp().
+		TCHAR key_name[20];
+		int i;
+		for (i = 0; key_name_pos[i] && key_name_pos[i] != '\\'; ++i)
+		{
+			if (i == 19)
+				return NULL; // Too long to be valid.
+			key_name[i] = key_name_pos[i];
+		}
+		key_name[i] = '\0';
+
+		if (key_name_pos[i] && aSyntax == REG_OLD_SYNTAX) // There's a \SubKey, but caller wasn't expecting one.
+			return NULL;
+
+		// Set output parameters for caller.
+		if (aSubkey)
+		{
+			if (key_name_pos[i] != '\\') // No subkey (not even a blank one).
+				*aSubkey = (aSyntax == REG_NEW_SYNTAX) ? _T("") : NULL; // In REG_EITHER_SYNTAX mode, caller wants to know it was omitted.
+			else
+				*aSubkey = key_name_pos + i + 1; // +1 for the slash.
+		}
+		if (aIsRemoteRegistry)
+			*aIsRemoteRegistry = (computer_name_end != NULL);
+
+		HKEY root_key;
 		if (!_tcsicmp(key_name, _T("HKLM")) || !_tcsicmp(key_name, _T("HKEY_LOCAL_MACHINE")))       root_key = HKEY_LOCAL_MACHINE;
 		else if (!_tcsicmp(key_name, _T("HKCR")) || !_tcsicmp(key_name, _T("HKEY_CLASSES_ROOT")))   root_key = HKEY_CLASSES_ROOT;
 		else if (!_tcsicmp(key_name, _T("HKCC")) || !_tcsicmp(key_name, _T("HKEY_CURRENT_CONFIG"))) root_key = HKEY_CURRENT_CONFIG;
 		else if (!_tcsicmp(key_name, _T("HKCU")) || !_tcsicmp(key_name, _T("HKEY_CURRENT_USER")))   root_key = HKEY_CURRENT_USER;
 		else if (!_tcsicmp(key_name, _T("HKU")) || !_tcsicmp(key_name, _T("HKEY_USERS")))           root_key = HKEY_USERS;
-		if (!root_key)  // Invalid or unsupported root key name.
+		else // Invalid or unsupported root key name.
 			return NULL;
-		if (!aIsRemoteRegistry || !colon_pos) // Either caller didn't want it opened, or it doesn't need to be.
+
+		if (!aIsRemoteRegistry || !computer_name_end) // Either caller didn't want it opened, or it doesn't need to be.
 			return root_key; // If it's a remote key, this value should only be used by the caller as an indicator.
 		// Otherwise, it's a remote computer whose registry the caller wants us to open:
 		// It seems best to require the two leading backslashes in case the computer name contains
 		// spaces (just in case spaces are allowed on some OSes or perhaps for Unix interoperability, etc.).
 		// Therefore, make no attempt to trim leading and trailing spaces from the computer name:
-		TCHAR computer_name[128];
+		TCHAR computer_name[COMPUTER_NAME_BUF_SIZE];
 		tcslcpy(computer_name, aBuf, _countof(computer_name));
-		computer_name[colon_pos - aBuf] = '\0';
+		computer_name[computer_name_end - aBuf] = '\0';
 		HKEY remote_key;
 		return (RegConnectRegistry(computer_name, root_key, &remote_key) == ERROR_SUCCESS) ? remote_key : NULL;
 	}
-
 	static LPTSTR RegConvertRootKey(LPTSTR aBuf, size_t aBufSize, HKEY aRootKey)
 	{
 		// switch() doesn't directly support expression of type HKEY:
@@ -1750,6 +1808,37 @@ public:
 		return FILE_LOOP_INVALID;
 	}
 
+	static FileLoopModeType ConvertLoopModeString(LPTSTR aBuf)
+	{
+		for (FileLoopModeType mode = FILE_LOOP_INVALID;;)
+		{
+			switch (ctoupper(*aBuf++))
+			{
+			// For simplicity, both are allowed with either kind of loop:
+			case 'F': // Files
+			case 'V': // Values
+				mode |= FILE_LOOP_FILES_ONLY;
+				break;
+			case 'D': // Directories
+			case 'K': // Keys
+				mode |= FILE_LOOP_FOLDERS_ONLY;
+				break;
+			case 'R':
+				mode |= FILE_LOOP_RECURSE;
+				break;
+			case ' ':  // Allow whitespace.
+			case '\t': //
+				break;
+			case '\0':
+				if ((mode & FILE_LOOP_FILES_AND_FOLDERS) == 0)
+					mode |= FILE_LOOP_FILES_ONLY; // Set default.
+				return mode;
+			default: // Invalid character.
+				return FILE_LOOP_INVALID;
+			}
+ 		}
+	}
+
 	static int ConvertMsgBoxResult(LPTSTR aBuf)
 	// Returns the matching ID, or zero if none.
 	{
@@ -1866,6 +1955,14 @@ public:
 		return (!*aX && !*aY) || (*aX && *aY) ? OK : FAIL;
 	}
 
+	bool IsExemptFromSuspend()
+	{
+		// Hotkey and Hotstring subroutines whose first line is the Suspend command are exempt from
+		// being suspended themselves except when their first parameter is the literal
+		// word "on":
+		return mActionType == ACT_SUSPEND && (!mArgc || ArgHasDeref(1) || _tcsicmp(mArg[0].text, _T("On")));
+	}
+
 	static LPTSTR LogToText(LPTSTR aBuf, int aBufSize);
 	LPTSTR VicinityToText(LPTSTR aBuf, int aBufSize);
 	LPTSTR ToText(LPTSTR aBuf, int aBufSize, bool aCRLF, DWORD aElapsed = 0, bool aLineWasResumed = false);
@@ -1918,7 +2015,7 @@ public:
 
 
 
-class Label
+class Label : public IObjectComCompatible
 {
 public:
 	LPTSTR mName;
@@ -1927,11 +2024,8 @@ public:
 
 	bool IsExemptFromSuspend()
 	{
-		// Hotkey and Hotstring subroutines whose first line is the Suspend command are exempt from
-		// being suspended themselves except when their first parameter is the literal
-		// word "on":
-		return mJumpToLine->mActionType == ACT_SUSPEND && (!mJumpToLine->mArgc || mJumpToLine->ArgHasDeref(1)
-			|| _tcsicmp(mJumpToLine->mArg[0].text, _T("On")));
+		// See Line::IsExemptFromSuspend() for comments.
+		return mJumpToLine->IsExemptFromSuspend();
 	}
 
 	ResultType Execute()
@@ -1959,6 +2053,83 @@ public:
 	void *operator new[](size_t aBytes) {return SimpleHeap::Malloc(aBytes);}
 	void operator delete(void *aPtr) {}
 	void operator delete[](void *aPtr) {}
+
+	// IObject.
+	ResultType STDMETHODCALLTYPE Invoke(ExprTokenType &aResultToken, ExprTokenType &aThisToken, int aFlags, ExprTokenType *aParam[], int aParamCount);
+	ULONG STDMETHODCALLTYPE AddRef() { return 1; }
+	ULONG STDMETHODCALLTYPE Release() { return 1; }
+#ifdef CONFIG_DEBUGGER
+	void DebugWriteProperty(IDebugProperties *, int aPage, int aPageSize, int aDepth) {}
+#endif
+};
+
+
+
+// This class encapsulates a pointer to an object which can be called by a timer,
+// hotkey, etc.  It provides common functionality that wouldn't be suitable for the
+// base IObject interface, but is needed for detection of "Suspend" or "Critical"
+// prior to calling the sub or function.
+class LabelPtr
+{
+protected:
+	IObject *mObject;
+	
+	enum CallableType
+	{
+		Callable_Label,
+		Callable_Func,
+		Callable_Object
+	};
+	static Line *getJumpToLine(IObject *aObject);
+	static CallableType getType(IObject *aObject);
+
+public:
+	LabelPtr() : mObject(NULL) {}
+	LabelPtr(IObject *object) : mObject(object) {}
+	ResultType ExecuteInNewThread(TCHAR *aNewThreadDesc
+		, ExprTokenType *aParamValue = NULL, int aParamCount = 0, INT_PTR *aRetVal = NULL) const;
+	const LabelPtr* operator-> () { return this; } // Act like a pointer.
+	operator void *() const { return mObject; } // For comparisons and boolean eval.
+
+	Label *ToLabel() const { return getType(mObject) == Callable_Label ? (Label *)mObject : NULL; }
+	
+	// Helper methods for legacy code which deals with Labels.
+	bool IsExemptFromSuspend() const;
+	ActionTypeType TypeOfFirstLine() const;
+	LPTSTR Name() const;
+};
+
+// LabelPtr with automatic reference-counting, for storing an object safely,
+// such as in a HotkeyVariant, UserMenuItem, etc.  In future, this could be
+// replaced with a more general smart pointer class.
+class LabelRef : public LabelPtr
+{
+public:
+	LabelRef() : LabelPtr() {}
+	LabelRef(IObject *object) : LabelPtr(object)
+	{
+		if (object)
+			object->AddRef();
+	}
+	LabelRef(const LabelPtr &other) : LabelPtr(other)
+	{
+		if (mObject)
+			mObject->AddRef();
+	}
+	LabelRef & operator = (IObject *object)
+	{
+		if (object)
+			object->AddRef();
+		if (mObject)
+			mObject->Release();
+		mObject = object;
+		return *this;
+	}
+	~LabelRef()
+	{
+		if (mObject)
+			mObject->Release();
+	}
 };
 
 
@@ -2128,7 +2299,7 @@ public:
 class ScriptTimer
 {
 public:
-	Label *mLabel;
+	LabelRef mLabel;
 	DWORD mPeriod; // v1.0.36.33: Changed from int to DWORD to double its capacity.
 	DWORD mTimeLastRun;  // TickCount
 	int mPriority;  // Thread priority relative to other threads, default 0.
@@ -2137,27 +2308,67 @@ public:
 	bool mRunOnlyOnce;
 	ScriptTimer *mNextTimer;  // Next items in linked list
 	void ScriptTimer::Disable();
-	ScriptTimer(Label *aLabel)
+	ScriptTimer(IObject *aLabel)
 		#define DEFAULT_TIMER_PERIOD 250
 		: mLabel(aLabel), mPeriod(DEFAULT_TIMER_PERIOD), mPriority(0) // Default is always 0.
 		, mExistingThreads(0), mTimeLastRun(0)
 		, mEnabled(false), mRunOnlyOnce(false), mNextTimer(NULL)  // Note that mEnabled must default to false for the counts to be right.
 	{}
-	void *operator new(size_t aBytes) {return SimpleHeap::Malloc(aBytes);}
-	void *operator new[](size_t aBytes) {return SimpleHeap::Malloc(aBytes);}
-	void operator delete(void *aPtr) {}
-	void operator delete[](void *aPtr) {}
 };
 
 
 
 struct MsgMonitorStruct
 {
-	Func *func;
+	IObject *func;
 	UINT msg;
 	// Keep any members smaller than 4 bytes adjacent to save memory:
-	short instance_count;  // Distinct from func.mInstances because the script might have called the function explicitly.
-	short max_instances; // v1.0.47: Support more than one thread.
+	static const UCHAR MAX_INSTANCES = MAX_THREADS_LIMIT; // For maintainability.  Causes a compiler warning if MAX_THREADS_LIMIT > MAX_UCHAR.
+	UCHAR instance_count; // Distinct from func.mInstances because the script might have called the function explicitly.
+	UCHAR max_instances; // v1.0.47: Support more than one thread.
+	bool is_legacy_monitor; // true if this is the backwards-compatible "singleton" monitor for this message.
+};
+
+
+struct MsgMonitorInstance;
+class MsgMonitorList
+{
+	MsgMonitorStruct *mMonitor;
+	MsgMonitorInstance *mTop;
+	int mCount, mCountMax;
+
+	friend struct MsgMonitorInstance;
+
+public:
+	MsgMonitorStruct *Find(UINT aMsg, IObject *aCallback, bool aIsLegacyMode);
+	MsgMonitorStruct *Add(UINT aMsg, IObject *aCallback, bool aIsLegacyMode, bool aAppend = TRUE);
+	void Remove(MsgMonitorStruct *aMonitor);
+	ResultType Call(ExprTokenType *aParamValue, int aParamCount, int aInitNewThreadIndex); // Used for OnExit and OnClipboardChange, but not OnMessage.
+
+	MsgMonitorStruct& operator[] (const int aIndex) { return mMonitor[aIndex]; }
+	int Count() { return mCount; }
+
+	MsgMonitorList() : mCount(0), mCountMax(0), mMonitor(NULL) {}
+};
+
+
+struct MsgMonitorInstance
+{
+	MsgMonitorList &list;
+	MsgMonitorInstance *previous;
+	int index;
+	int count;
+
+	MsgMonitorInstance(MsgMonitorList &aList)
+		: list(aList), previous(aList.mTop), index(0), count(aList.mCount)
+	{
+		aList.mTop = this;
+	}
+
+	~MsgMonitorInstance()
+	{
+		list.mTop = previous;
+	}
 };
 
 
@@ -2191,10 +2402,10 @@ public:
 	{
 	}
 
-	ResultType AddItem(LPTSTR aName, UINT aMenuID, Label *aLabel, UserMenu *aSubmenu, LPTSTR aOptions);
+	ResultType AddItem(LPTSTR aName, UINT aMenuID, IObject *aLabel, UserMenu *aSubmenu, LPTSTR aOptions);
 	ResultType DeleteItem(UserMenuItem *aMenuItem, UserMenuItem *aMenuItemPrev);
 	ResultType DeleteAllItems();
-	ResultType ModifyItem(UserMenuItem *aMenuItem, Label *aLabel, UserMenu *aSubmenu, LPTSTR aOptions);
+	ResultType ModifyItem(UserMenuItem *aMenuItem, IObject *aLabel, UserMenu *aSubmenu, LPTSTR aOptions);
 	void UpdateOptions(UserMenuItem *aMenuItem, LPTSTR aOptions);
 	ResultType RenameItem(UserMenuItem *aMenuItem, LPTSTR aNewName);
 	ResultType UpdateName(UserMenuItem *aMenuItem, LPTSTR aNewName);
@@ -2233,7 +2444,7 @@ public:
 	LPTSTR mName;  // Dynamically allocated.
 	size_t mNameCapacity;
 	UINT mMenuID;
-	Label *mLabel;
+	LabelRef mLabel;
 	UserMenu *mSubmenu;
 	UserMenu *mMenu;  // The menu to which this item belongs.  Needed to support script var A_ThisMenu.
 	int mPriority;
@@ -2261,7 +2472,7 @@ public:
 	};
 
 	// Constructor:
-	UserMenuItem(LPTSTR aName, size_t aNameCapacity, UINT aMenuID, Label *aLabel, UserMenu *aSubmenu, UserMenu *aMenu);
+	UserMenuItem(LPTSTR aName, size_t aNameCapacity, UINT aMenuID, IObject *aLabel, UserMenu *aSubmenu, UserMenu *aMenu);
 
 	// Don't overload new and delete operators in this case since we want to use real dynamic memory
 	// (since menus can be read in from a file, destroyed and recreated, over and over).
@@ -2330,7 +2541,7 @@ struct GuiControlType
 	TabControlIndexType tab_control_index; // Which tab control this control belongs to, if any.
 	TabIndexType tab_index; // For type==TAB, this stores the tab control's index.  For other types, it stores the page.
 	Var *output_var;
-	Label *jump_to_label;
+	LabelRef jump_to_label;
 	union
 	{
 		COLORREF union_color;  // Color of the control's text.
@@ -2404,7 +2615,7 @@ public:
 	GuiControlType *mControl; // Will become an array of controls when the window is first created.
 	GuiIndexType mDefaultButtonIndex; // Index vs. pointer is needed for some things.
 	ULONG mReferenceCount; // For keeping this structure in memory during execution of the Gui's labels.
-	Label *mLabelForClose, *mLabelForEscape, *mLabelForSize, *mLabelForDropFiles, *mLabelForContextMenu;
+	LabelPtr mLabelForClose, mLabelForEscape, mLabelForSize, mLabelForDropFiles, mLabelForContextMenu; // These aren't reference counted, as they can only be a Func or Label, not a dynamic object.
 	bool mLabelForCloseIsRunning, mLabelForEscapeIsRunning, mLabelForSizeIsRunning; // DropFiles doesn't need one of these.
 	bool mLabelsHaveBeenSet;
 	DWORD mStyle, mExStyle; // Style of window.
@@ -2488,6 +2699,8 @@ public:
 	void AddRef();
 	void Release();
 	void SetLabels(LPTSTR aLabelPrefix);
+	static LPTSTR ConvertEvent(GuiEventType evt);
+	static IObject* CreateDropArray(HDROP hDrop);
 	static void UpdateMenuBars(HMENU aMenu);
 	ResultType AddControl(GuiControls aControlType, LPTSTR aOptions, LPTSTR aText);
 
@@ -2496,7 +2709,7 @@ public:
 	void GetTotalWidthAndHeight(LONG &aWidth, LONG &aHeight);
 
 	ResultType ControlParseOptions(LPTSTR aOptions, GuiControlOptionsType &aOpt, GuiControlType &aControl
-		, GuiIndexType aControlIndex = -1); // aControlIndex is not needed upon control creation.
+		, GuiIndexType aControlIndex = -1, Var *aParam3Var = NULL); // aControlIndex is not needed upon control creation.
 	void ControlInitOptions(GuiControlOptionsType &aOpt, GuiControlType &aControl);
 	void ControlAddContents(GuiControlType &aControl, LPTSTR aContent, int aChoice, GuiControlOptionsType *aOpt = NULL);
 	ResultType Show(LPTSTR aOptions, LPTSTR aTitle);
@@ -2540,7 +2753,7 @@ public:
 	static int FindFont(FontType &aFont);
 
 	void Event(GuiIndexType aControlIndex, UINT aNotifyCode, USHORT aGuiEvent = GUI_EVENT_NONE, UINT_PTR aEventInfo = 0);
-	int CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr);
+	LRESULT CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr);
 
 	static WORD TextToHotkey(LPTSTR aText);
 	static LPTSTR HotkeyToText(WORD aHotkey, LPTSTR aBuf);
@@ -2596,6 +2809,7 @@ private:
 	WinGroup *mFirstGroup, *mLastGroup;  // The first and last variables in the linked list.
 	int mCurrentFuncOpenBlockCount; // While loading the script, this is how many blocks are currently open in the current function's body.
 	bool mNextLineIsFunctionBody; // Whether the very next line to be added will be the first one of the body.
+	bool mNoUpdateLabels;
 
 #define MAX_NESTED_CLASSES 5
 #define MAX_CLASS_NAME_LENGTH UCHAR_MAX
@@ -2636,8 +2850,10 @@ private:
 	// if aStartingLine is allowed to be NULL (for recursive calls).  If they
 	// were member functions of class Line, a check for NULL would have to
 	// be done before dereferencing any line's mNextLine, for example:
-	Line *PreparseBlocks(Line *aStartingLine, bool aFindBlockEnd = false, Line *aParentLine = NULL);
-	Line *PreparseIfElse(Line *aStartingLine, ExecUntilMode aMode = NORMAL_MODE, AttributeType aLoopType = ATTR_NONE);
+	ResultType PreparseExpressions(Line *aStartingLine);
+	ResultType PreparseStaticLines(Line *aStartingLine);
+	Line *PreparseBlocks(Line *aStartingLine, ExecUntilMode aMode = NORMAL_MODE, Line *aParentLine = NULL, const AttributeType aLoopType = ATTR_NONE);
+	Line *PreparseCommands(Line *aStartingLine);
 
 public:
 	Line *mCurrLine;     // Seems better to make this public than make Line our friend.
@@ -2645,9 +2861,11 @@ public:
 	TCHAR mThisMenuItemName[MAX_MENU_NAME_LENGTH + 1];
 	TCHAR mThisMenuName[MAX_MENU_NAME_LENGTH + 1];
 	LPTSTR mThisHotkeyName, mPriorHotkeyName;
+	MsgMonitorList mOnExit, mOnClipboardChange; // Lists of event handlers for OnExit() and OnClipboardChange().
+	Label *mOnClipboardChangeLabel; // Separate from mOnClipboardChange for backward-compatibility reasons.
+	Label *mOnExitLabel;  // The label to run when the script terminates (NULL if none).
 	HWND mNextClipboardViewer;
 	bool mOnClipboardChangeIsRunning;
-	Label *mOnClipboardChangeLabel, *mOnExitLabel;  // The label to run when the script terminates (NULL if none).
 	ExitReasons mExitReason;
 
 	ScriptTimer *mFirstTimer, *mLastTimer;  // The first and last script timers in the linked list.
@@ -2669,9 +2887,7 @@ public:
 	bool mAutoExecSectionIsRunning;
 	bool mIsRestart; // The app is restarting rather than starting from scratch.
 	bool mErrorStdOut; // true if load-time syntax errors should be sent to stdout vs. a MsgBox.
-#ifdef AUTOHOTKEYSC
-	bool mCompiledHasCustomIcon; // Whether the compiled script uses a custom icon.
-#else
+#ifndef AUTOHOTKEYSC
 	TextStream *mIncludeLibraryFunctionsThenExit;
 #endif
 	__int64 mLinesExecutedThisCycle; // Use 64-bit to match the type of g->LinesPerCycle
@@ -2692,6 +2908,7 @@ public:
     
 	ResultType Init(global_struct &g, LPTSTR aScriptFilename, bool aIsRestart);
 	ResultType CreateWindows();
+	void EnableClipboardListener(bool aEnable);
 	void EnableOrDisableViewMenuItems(HMENU aMenu, UINT aFlags);
 	void CreateTrayIcon();
 	void UpdateTrayIcon(bool aForceUpdate = false);
@@ -2700,14 +2917,11 @@ public:
 	ResultType Reload(bool aDisplayErrors);
 	ResultType ExitApp(ExitReasons aExitReason, LPTSTR aBuf = NULL, int ExitCode = 0);
 	void TerminateApp(ExitReasons aExitReason, int aExitCode); // L31: Added aExitReason. See script.cpp.
-#ifdef AUTOHOTKEYSC
 	LineNumberType LoadFromFile();
-#else
-	LineNumberType LoadFromFile(bool aScriptWasNotspecified);
-#endif
 	ResultType LoadIncludedFile(LPTSTR aFileSpec, bool aAllowDuplicateInclude, bool aIgnoreLoadFailure);
-	ResultType UpdateOrCreateTimer(Label *aLabel, LPTSTR aPeriod, LPTSTR aPriority, bool aEnable
+	ResultType UpdateOrCreateTimer(IObject *aLabel, LPTSTR aPeriod, LPTSTR aPriority, bool aEnable
 		, bool aUpdatePriorityOnly);
+	void DeleteTimer(IObject *aLabel);
 
 	ResultType DefineFunc(LPTSTR aBuf, Var *aFuncGlobalVar[]);
 #ifndef AUTOHOTKEYSC
@@ -2735,6 +2949,7 @@ public:
 	WinGroup *FindGroup(LPTSTR aGroupName, bool aCreateIfNotFound = false);
 	ResultType AddGroup(LPTSTR aGroupName);
 	Label *FindLabel(LPTSTR aLabelName);
+	IObject *FindCallable(LPTSTR aLabelName, Var *aVar = NULL, int aParamCount = 0);
 
 	ResultType DoRunAs(LPTSTR aCommandLine, LPTSTR aWorkingDir, bool aDisplayErrors, bool aUpdateLastError, WORD aShowWindow
 		, Var *aOutputVar, PROCESS_INFORMATION &aPI, bool &aSuccess, HANDLE &aNewProcess, LPTSTR aSystemErrorText);
@@ -2745,9 +2960,10 @@ public:
 	LPTSTR ListVars(LPTSTR aBuf, int aBufSize);
 	LPTSTR ListKeyHistory(LPTSTR aBuf, int aBufSize);
 
-	ResultType PerformMenu(LPTSTR aMenu, LPTSTR aCommand, LPTSTR aParam3, LPTSTR aParam4, LPTSTR aOptions, LPTSTR aOptions2); // L17: Added aOptions2 for Icon sub-command (icon width). Arg was previously reserved/unused.
+	ResultType PerformMenu(LPTSTR aMenu, LPTSTR aCommand, LPTSTR aParam3, LPTSTR aParam4, LPTSTR aOptions, LPTSTR aOptions2, Var *aParam4Var); // L17: Added aOptions2 for Icon sub-command (icon width). Arg was previously reserved/unused.
 	UserMenu *FindMenu(LPTSTR aMenuName);
 	UserMenu *AddMenu(LPTSTR aMenuName);
+	UINT ThisMenuItemPos();
 	ResultType ScriptDeleteMenu(UserMenu *aMenu);
 	UserMenuItem *FindMenuItemByID(UINT aID)
 	{
@@ -2769,7 +2985,7 @@ public:
 	}
 
 	ResultType PerformGui(LPTSTR aBuf, LPTSTR aControlType, LPTSTR aOptions, LPTSTR aParam4);
-	static GuiType *ResolveGui(LPTSTR aBuf, LPTSTR &aCommand, LPTSTR *aName = NULL, size_t *aNameLength = NULL);
+	static GuiType *ResolveGui(LPTSTR aBuf, LPTSTR &aCommand, LPTSTR *aName = NULL, size_t *aNameLength = NULL, LPTSTR aControlID = NULL);
 
 	// Call this SciptError to avoid confusion with Line's error-displaying functions:
 	ResultType ScriptError(LPCTSTR aErrorText, LPCTSTR aExtraInfo = _T("")); // , ResultType aErrorType = FAIL);
@@ -2919,8 +3135,9 @@ BIF_DECL(BIF_StrLen);
 BIF_DECL(BIF_SubStr);
 BIF_DECL(BIF_InStr);
 BIF_DECL(BIF_StrSplit);
+BIF_DECL(BIF_StrReplace);
 BIF_DECL(BIF_RegEx);
-BIF_DECL(BIF_Asc);
+BIF_DECL(BIF_Ord);
 BIF_DECL(BIF_Chr);
 BIF_DECL(BIF_Format);
 BIF_DECL(BIF_NumGet);
@@ -2948,6 +3165,7 @@ BIF_DECL(BIF_Exp);
 BIF_DECL(BIF_SqrtLogLn);
 
 BIF_DECL(BIF_OnMessage);
+BIF_DECL(BIF_OnExitOrClipboard);
 
 #ifdef ENABLE_REGISTERCALLBACK
 BIF_DECL(BIF_RegisterCallback);
@@ -2982,12 +3200,20 @@ BIF_DECL(BIF_ObjGetInPlace); // Pseudo-operator.
 BIF_DECL(BIF_ObjNew); // Pseudo-operator.
 BIF_DECL(BIF_ObjIncDec); // Pseudo-operator.
 BIF_DECL(BIF_ObjAddRefRelease);
+BIF_DECL(BIF_ObjBindMethod);
+BIF_DECL(BIF_ObjRawSet);
 // Built-ins also available as methods -- these are available as functions for use primarily by overridden methods (i.e. where using the built-in methods isn't possible as they're no longer accessible).
 BIF_DECL(BIF_ObjInsert);
+BIF_DECL(BIF_ObjInsertAt);
+BIF_DECL(BIF_ObjPush);
+BIF_DECL(BIF_ObjPop);
+BIF_DECL(BIF_ObjDelete);
 BIF_DECL(BIF_ObjRemove);
+BIF_DECL(BIF_ObjRemoveAt);
 BIF_DECL(BIF_ObjGetCapacity);
 BIF_DECL(BIF_ObjSetCapacity);
 BIF_DECL(BIF_ObjGetAddress);
+BIF_DECL(BIF_ObjLength);
 BIF_DECL(BIF_ObjMaxIndex);
 BIF_DECL(BIF_ObjMinIndex);
 BIF_DECL(BIF_ObjNewEnum);
@@ -3013,7 +3239,7 @@ BIF_DECL(BIF_Exception);
 
 BOOL LegacyResultToBOOL(LPTSTR aResult);
 BOOL LegacyVarToBOOL(Var &aVar);
-BOOL TokenToBOOL(ExprTokenType &aToken, SymbolType aTokenIsNumber);
+BOOL TokenToBOOL(ExprTokenType &aToken, SymbolType aTokenIsNumber = SYM_INVALID);
 SymbolType TokenIsPureNumeric(ExprTokenType &aToken);
 BOOL TokenIsEmptyString(ExprTokenType &aToken);
 BOOL TokenIsEmptyString(ExprTokenType &aToken, BOOL aWarnUninitializedVar); // Same as TokenIsEmptyString but optionally warns if the token is an uninitialized var.
@@ -3030,6 +3256,7 @@ void SetWorkingDir(LPTSTR aNewDir);
 int ConvertJoy(LPTSTR aBuf, int *aJoystickID = NULL, bool aAllowOnlyButtons = false);
 bool ScriptGetKeyState(vk_type aVK, KeyStateTypes aKeyStateType);
 double ScriptGetJoyState(JoyControls aJoy, int aJoystickID, ExprTokenType &aToken, bool aUseBoolForUpDown);
+LPTSTR GetExitReasonString(ExitReasons aExitReason);
 
 #endif
 

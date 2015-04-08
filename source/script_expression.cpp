@@ -1402,7 +1402,7 @@ push_this_token:
 non_null_circuit_token:
 			// Cast this left-branch result to true/false, then determine whether it should cause its
 			// parent AND/OR/IFF to short-circuit.
-			left_branch_is_true = TokenToBOOL(this_token, TokenIsPureNumeric(this_token));
+			left_branch_is_true = TokenToBOOL(this_token);
 			if (this_token.circuit_token->symbol == SYM_IFF_THEN)
 			{
 				if (!left_branch_is_true) // The ternary's condition is false.
@@ -1749,8 +1749,9 @@ bool Func::Call(FuncCallData &aFuncCall, ResultType &aResult, ExprTokenType &aRe
 				ExprTokenType **param_list = (ExprTokenType **)(token + extra_params);
 				// Since built-in functions don't have variables we can directly assign to,
 				// we need to expand the param object's contents into an array of tokens:
-				if (!param_obj->ArrayToParams(token, param_list, extra_params, aParam, aParamCount))
-					return false; // Abort expression.
+				param_obj->ArrayToParams(token, param_list, extra_params, aParam, aParamCount);
+				aParam = param_list;
+				aParamCount += extra_params;
 			}
 		}
 		if (rvalue)

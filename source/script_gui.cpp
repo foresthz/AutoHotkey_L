@@ -22,7 +22,7 @@ GNU General Public License for more details.
 #include "qmath.h" // for qmathLog()
 
 
-GuiType *Script::ResolveGui(LPTSTR aBuf, LPTSTR &aCommand, LPTSTR *aName, size_t *aNameLength)
+GuiType *Script::ResolveGui(LPTSTR aBuf, LPTSTR &aCommand, LPTSTR *aName, size_t *aNameLength, LPTSTR aControlID)
 {
 	LPTSTR name_marker = NULL;
 	size_t name_length = 0;
@@ -30,6 +30,14 @@ GuiType *Script::ResolveGui(LPTSTR aBuf, LPTSTR &aCommand, LPTSTR *aName, size_t
 	
 	if (!name_marker) // i.e. no name was specified.
 	{
+		// v1.1.20: Support omitting the GUI name when specifying a control by HWND.
+		if (aControlID && IsPureNumeric(aControlID, TRUE, FALSE) == PURE_INTEGER)
+		{
+			HWND control_hwnd = (HWND)ATOI64(aControlID);
+			if (GuiType *pgui = GuiType::FindGuiParent(control_hwnd))
+				return pgui;
+		}
+
 		if (g->GuiDefaultWindowValid())
 			return g->GuiDefaultWindow;
 		else if (g->GuiDefaultWindow) // i.e. it contains a Gui name but no valid Gui.
@@ -623,9 +631,9 @@ return_the_result:
 
 
 
-ResultType Line::GuiControl(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3)
+ResultType Line::GuiControl(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3, Var *aParam3Var)
 {
-	GuiType *pgui = Script::ResolveGui(aCommand, aCommand);
+	GuiType *pgui = Script::ResolveGui(aCommand, aCommand, NULL, 0, aControlID);
 	GuiControlCmds guicontrol_cmd = Line::ConvertGuiControlCmd(aCommand);
 	if (guicontrol_cmd == GUICONTROL_CMD_INVALID)
 		// This is caught at load-time 99% of the time and can only occur here if the sub-command name
@@ -677,7 +685,7 @@ ResultType Line::GuiControl(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3)
 	{
 		GuiControlOptionsType go; // Its contents not currently used here, but it might be in the future.
 		gui.ControlInitOptions(go, control);
-		result = gui.ControlParseOptions(aCommand, go, control, control_index);
+		result = gui.ControlParseOptions(aCommand, go, control, control_index, aParam3Var);
 		goto return_the_result;
 	}
 
@@ -1443,7 +1451,7 @@ error:
 ResultType Line::GuiControlGet(LPTSTR aCommand, LPTSTR aControlID, LPTSTR aParam3)
 {
 	Var &output_var = *OUTPUT_VAR;
-	GuiType *pgui = Script::ResolveGui(aCommand, aCommand);
+	GuiType *pgui = Script::ResolveGui(aCommand, aCommand, NULL, 0, aControlID);
 	GuiControlGetCmds guicontrolget_cmd = Line::ConvertGuiControlGetCmd(aCommand);
 	if (guicontrolget_cmd == GUICONTROLGET_CMD_INVALID)
 		// This is caught at load-time 99% of the time and can only occur here if the sub-command name
@@ -1790,7 +1798,8 @@ ResultType GuiType::Create()
 		wc.lpszClassName = WINDOW_CLASS_GUI;
 		wc.hInstance = g_hInstance;
 		wc.lpfnWndProc = GuiWindowProc;
-		wc.hIcon = wc.hIconSm = (HICON)LoadImage(g_hInstance, MAKEINTRESOURCE(IDI_MAIN), IMAGE_ICON, 0, 0, LR_SHARED); // Use LR_SHARED to conserve memory (since the main icon is loaded for so many purposes).
+		wc.hIcon = g_IconLarge;
+		wc.hIconSm = g_IconSmall;
 		wc.style = CS_DBLCLKS; // v1.0.44.12: CS_DBLCLKS is accepted as a good default by nearly everyone.  It causes the window to receive WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK, and WM_MBUTTONDBLCLK (even without this, all windows receive WM_NCLBUTTONDBLCLK, WM_NCMBUTTONDBLCLK, and WM_NCRBUTTONDBLCLK).
 			// CS_HREDRAW and CS_VREDRAW are not included above because they cause extra flickering.  It's generally better for a window to manage its own redrawing when it's resized.
 		wc.hCursor = LoadCursor((HINSTANCE) NULL, IDC_ARROW);
@@ -1821,9 +1830,12 @@ ResultType GuiType::Create()
 		mIconEligibleForDestructionSmall = small_icon = g_script.mCustomIconSmall; // Should always be non-NULL if mCustomIcon is non-NULL.
 	}
 	else
-		big_icon = small_icon = (HICON)LoadImage(g_hInstance, MAKEINTRESOURCE(IDI_MAIN), IMAGE_ICON, 0, 0, LR_SHARED); // Use LR_SHARED to conserve memory (since the main icon is loaded for so many purposes).
-		// Unlike mCustomIcon, leave mIconEligibleForDestruction NULL because a shared HICON such as one
-		// loaded via LR_SHARED should never be destroyed.
+	{
+		big_icon = g_IconLarge;
+		small_icon = g_IconSmall;
+		// Unlike mCustomIcon, leave mIconEligibleForDestruction NULL because these
+		// icons are used for various other purposes and should never be destroyed.
+	}
 	// Setting the small icon puts it in the upper left corner of the dialog window.
 	// Setting the big icon makes the dialog show up correctly in the Alt-Tab menu (but big seems to
 	// have no effect unless the window is unowned, i.e. it has a button on the task bar).
@@ -1841,6 +1853,40 @@ ResultType GuiType::Create()
 	SendMessage(mHwnd, WM_SETICON, ICON_BIG, (LPARAM)big_icon);   // i.e. there is no previous icon to destroy in this case.
 
 	return OK;
+}
+
+
+
+LPTSTR GuiType::ConvertEvent(GuiEventType evt)
+{
+	static LPTSTR sNames[] = GUI_EVENT_NAMES;
+	static TCHAR sBuf[2] = { 0, 0 };
+
+	if (evt < GUI_EVENT_FIRST_UNNAMED)
+		return sNames[evt];
+
+	// Else it's a character code - convert it to a string
+	sBuf[0] = (TCHAR)(UCHAR)evt;
+	return sBuf;
+}
+
+
+
+IObject* GuiType::CreateDropArray(HDROP hDrop)
+{
+	TCHAR buf[MAX_PATH];
+	UINT file_count = DragQueryFile(hDrop, 0xFFFFFFFF, NULL, 0);
+	Object* obj = Object::Create();
+	ExprTokenType tok(buf);
+	ExprTokenType* pTok = &tok;
+
+	for (UINT u = 0; u < file_count; u++)
+	{
+		DragQueryFile(hDrop, u, buf, MAX_PATH);
+		obj->InsertAt(u, u+1, &pTok, 1);
+	}
+
+	return obj;
 }
 
 
@@ -1873,23 +1919,23 @@ void GuiType::SetLabels(LPTSTR aLabelPrefix)
 
 	// Find the label to run automatically when the form closes (if any):
 	_tcscpy(label_suffix, _T("Close"));
-	mLabelForClose = g_script.FindLabel(label_name);  // OK if NULL (closing the window is the same as "gui, cancel").
+	mLabelForClose = g_script.FindCallable(label_name, NULL, 1);  // OK if NULL (closing the window is the same as "gui, cancel").
 
 	// Find the label to run automatically when the user presses Escape (if any):
 	_tcscpy(label_suffix, _T("Escape"));
-	mLabelForEscape = g_script.FindLabel(label_name);  // OK if NULL (pressing ESCAPE does nothing).
+	mLabelForEscape = g_script.FindCallable(label_name, NULL, 1);  // OK if NULL (pressing ESCAPE does nothing).
 
 	// Find the label to run automatically when the user resizes the window (if any):
 	_tcscpy(label_suffix, _T("Size"));
-	mLabelForSize = g_script.FindLabel(label_name);  // OK if NULL.
+	mLabelForSize = g_script.FindCallable(label_name, NULL, 4);  // OK if NULL.
 
 	// Find the label to run automatically when the user invokes context menu via AppsKey, Rightclick, or Shift-F10:
 	_tcscpy(label_suffix, _T("ContextMenu"));
-	mLabelForContextMenu = g_script.FindLabel(label_name);  // OK if NULL (leaves context menu unhandled).
+	mLabelForContextMenu = g_script.FindCallable(label_name, NULL, 6);  // OK if NULL (leaves context menu unhandled).
 
 	// Find the label to run automatically when files are dropped onto the window:
 	_tcscpy(label_suffix, _T("DropFiles"));
-	if ((mLabelForDropFiles = g_script.FindLabel(label_name))  // OK if NULL (dropping files is disallowed).
+	if ((mLabelForDropFiles = g_script.FindCallable(label_name, NULL, 5))  // OK if NULL (dropping files is disallowed).
 		&& !mHdrop) // i.e. don't allow user to visibly drop files onto window if a drop is already queued or running.
 		mExStyle |= WS_EX_ACCEPTFILES; // Makes the window accept drops. Otherwise, the WM_DROPFILES msg is not received.
 	else
@@ -2345,7 +2391,7 @@ ResultType GuiType::AddControl(GuiControls aControlType, LPTSTR aOptions, LPTSTR
 		//LPTSTR string_list[] = {_T("\r"), _T("\n"), _T(" "), _T("\t"), _T("&"), _T("`"), NULL}; // \r is separate from \n in case they're ever unpaired. Last char must be NULL to terminate the list.
 		//for (LPTSTR *cp = string_list; *cp; ++cp)
 		//	StrReplace(label_name, *cp, _T(""), SCS_SENSITIVE);
-		control.jump_to_label = g_script.FindLabel(label_name);  // OK if NULL (the button will do nothing).
+		control.jump_to_label = g_script.FindCallable(label_name, NULL, 4);  // OK if NULL (the button will do nothing).
 	}
 
 	// The below will yield NULL for GUI_CONTROL_STATUSBAR because control.tab_control_index==OutOfBounds for it.
@@ -4480,7 +4526,7 @@ void GuiType::GetTotalWidthAndHeight(LONG &aWidth, LONG &aHeight)
 
 
 ResultType GuiType::ControlParseOptions(LPTSTR aOptions, GuiControlOptionsType &aOpt, GuiControlType &aControl
-	, GuiIndexType aControlIndex)
+	, GuiIndexType aControlIndex, Var *aParam3Var)
 // Caller must have already initialized aOpt with zeroes or any other desired starting values.
 // Caller must ensure that aOptions is a modifiable string, since this method temporarily alters it.
 {
@@ -5481,7 +5527,7 @@ ResultType GuiType::ControlParseOptions(LPTSTR aOptions, GuiControlOptionsType &
 			}
 
 			++next_option;  // Above has already verified that next_option isn't the empty string.
-			if (!*next_option)
+			if (!*next_option && !(adding && aParam3Var && aParam3Var->HasObject()))
 			{
 				// The option word consists of only one character, so consider it valid only if it doesn't
 				// require an arg.  Example: An isolated "H" should not cause the height to be set to zero.
@@ -5522,8 +5568,8 @@ ResultType GuiType::ControlParseOptions(LPTSTR aOptions, GuiControlOptionsType &
 					return aControl.hwnd ? g_script.SetErrorLevelOrThrow()
 						: g_script.ScriptError(_T("This control type should not have an associated subroutine.")
 							, next_option - 1);
-				Label *candidate_label;
-				if (   !(candidate_label = g_script.FindLabel(next_option))   )
+				IObject *candidate_label;
+				if (   !(candidate_label = g_script.FindCallable(next_option, aParam3Var, 4))   )
 				{
 					// If there is no explicit label, fall back to a special action if one is available
 					// for this keyword:
@@ -6590,9 +6636,9 @@ ResultType GuiType::Show(LPTSTR aOptions, LPTSTR aText)
 		// account. To account for the scroll bars, call the GetSystemMetrics function with SM_CXVSCROLL
 		// or SM_CYHSCROLL."
 		if (style & WS_HSCROLL)
-			width += GetSystemMetrics(SM_CXHSCROLL);
+			height += GetSystemMetrics(SM_CYHSCROLL);
 		if (style & WS_VSCROLL)
-			height += GetSystemMetrics(SM_CYVSCROLL);
+			width += GetSystemMetrics(SM_CXVSCROLL);
 
 		RECT work_rect;
 		SystemParametersInfo(SPI_GETWORKAREA, 0, &work_rect, 0);  // Get desktop rect excluding task bar.
@@ -7667,7 +7713,7 @@ LRESULT CALLBACK GuiWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPara
 	// CalledByIsDialogMessageOrDispatch for any threads beneath it.  Although this may technically be
 	// unnecessary, it adds maintainability.
 	LRESULT msg_reply;
-	if (g_MsgMonitorCount // Count is checked here to avoid function-call overhead.
+	if (g_MsgMonitor.Count() // Count is checked here to avoid function-call overhead.
 		&& (!g->CalledByIsDialogMessageOrDispatch || g->CalledByIsDialogMessageOrDispatchMsg != iMsg) // v1.0.44.11: If called by IsDialog or Dispatch but they changed the message number, check if the script is monitoring that new number.
 		&& MsgMonitor(hWnd, iMsg, wParam, lParam, NULL, msg_reply))
 		return msg_reply; // MsgMonitor has returned "true", indicating that this message should be omitted from further processing.
@@ -7722,10 +7768,24 @@ LRESULT CALLBACK GuiWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPara
 			mmi.ptMinTrackSize.x = pgui->mMinWidth;
 		if (pgui->mMinHeight >= 0)
 			mmi.ptMinTrackSize.y = pgui->mMinHeight;
-		if (pgui->mMaxWidth >= 0)   // mmi.ptMaxSize.x/y aren't changed because it seems the OS
-			mmi.ptMaxTrackSize.x = pgui->mMaxWidth; // automatically uses ptMaxTrackSize for them, at least when
-		if (pgui->mMaxHeight >= 0)   // ptMaxTrackSize is smaller than the system's default for
-			mmi.ptMaxTrackSize.y = pgui->mMaxHeight; // mmi.ptMaxSize.
+		// mmi.ptMaxSize.x/y aren't changed because it seems the OS automatically uses ptMaxTrackSize
+		// for them, at least when ptMaxTrackSize is smaller than the system's default for mmi.ptMaxSize.
+		if (pgui->mMaxWidth >= 0)
+		{
+			mmi.ptMaxTrackSize.x = pgui->mMaxWidth;
+			// If the user applies a MaxSize less than MinSize, MinSize appears to take precedence except
+			// that the window behaves oddly when dragging the left or top edge outward.  This adjustment
+			// removes the odd behaviour but does not visibly affect the size limits.  The user-specified
+			// MaxSize and MinSize are retained, so applying -MinSize lets MaxSize take effect.
+			if (mmi.ptMaxTrackSize.x < mmi.ptMinTrackSize.x)
+				mmi.ptMaxTrackSize.x = mmi.ptMinTrackSize.x;
+		}
+		if (pgui->mMaxHeight >= 0)
+		{
+			mmi.ptMaxTrackSize.y = pgui->mMaxHeight;
+			if (mmi.ptMaxTrackSize.y < mmi.ptMinTrackSize.y) // See above for comments.
+				mmi.ptMaxTrackSize.y = mmi.ptMinTrackSize.y;
+		}
 		return 0; // "If an application processes this message, it should return zero."
 	}
 
@@ -7838,9 +7898,11 @@ LRESULT CALLBACK GuiWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPara
 			case LVN_GETINFOTIPA: // in notifying the script because it would have no means of changing the tip (by altering the struct), except perhaps OnMessage.
 				return 0; // Return immediately to avoid calling Event() and DefDlgProc(). A return value of 0 is suitable for all of the above.
 
-			case 0xFFFFFF4F: // Couldn't find these in commctrl.h anywhere. They seem to occur when control is first created and once for each row in the first set of added rows.
-			case 0xFFFFFF5F:
-			case 0xFFFFFF5D: // Probably something to do with incremental search since it seems to happen only when items are present and the user types a visible-character key.
+			//case 0xFFFFFF4F: // Couldn't find these in commctrl.h anywhere. They seem to occur when control is first created and once for each row in the first set of added rows.
+			//case 0xFFFFFF5F:
+			//case 0xFFFFFF5D: // Probably something to do with incremental search since it seems to happen only when items are present and the user types a visible-character key.
+			default: // This covers the three above and any other events which aren't classified by this switch(),
+				// such as LVN_GETEMPTYMARKUP and any others invented after this switch() was first written.
 				is_actionable = false;
 				break; // Let default proc handle them since they might mean something to it.
 
@@ -8551,7 +8613,7 @@ LRESULT CALLBACK GuiWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPara
 		{
 			HWND clicked_hwnd = (HWND)wParam;
 			bool from_keyboard; // Whether Context Menu was generated from keyboard (AppsKey or Shift-F10).
-			if (   !(from_keyboard = (lParam == 0xFFFFFFFF))   ) // Mouse click vs. keyboard event.
+			if (   !(from_keyboard = (lParam == -1))   ) // Mouse click vs. keyboard event.
 			{
 				// If the click occurred above the client area, assume it was in title/menu bar or border.
 				// Let default proc handle it.
@@ -9007,7 +9069,7 @@ void GuiType::Event(GuiIndexType aControlIndex, UINT aNotifyCode, USHORT aGuiEve
 }
 
 
-int GuiType::CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr)
+LRESULT GuiType::CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr)
 {
 	// See MsgMonitor() in application.cpp for comments, as this method is based on the beforementioned function.
 
@@ -9015,15 +9077,15 @@ int GuiType::CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr)
 		return 0;
 
 	GuiControlType& aControl = mControl[aControlIndex];
-	Label* glabel = aControl.jump_to_label;
+	LabelRef &glabel = aControl.jump_to_label;
 	if (!glabel)
 		return 0;
 
-	Line* jumpToLine = glabel->mJumpToLine;
+	ActionTypeType type_of_first_line = glabel->TypeOfFirstLine();
 
 	if (g_nThreads >= g_MaxThreadsTotal)
 		if (g_nThreads >= MAX_THREADS_EMERGENCY
-			|| jumpToLine->mActionType != ACT_EXITAPP && jumpToLine->mActionType != ACT_RELOAD)
+			|| type_of_first_line != ACT_EXITAPP && type_of_first_line != ACT_RELOAD)
 			return 0;
 
 	if (g->Priority > 0)
@@ -9031,9 +9093,8 @@ int GuiType::CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr)
 
 	TCHAR ErrorLevel_saved[ERRORLEVEL_SAVED_SIZE];
 	tcslcpy(ErrorLevel_saved, g_ErrorLevel->Contents(), _countof(ErrorLevel_saved));
-	InitNewThread(0, false, true, jumpToLine->mActionType);
+	InitNewThread(0, false, true, type_of_first_line);
 	g_ErrorLevel->Assign(ERRORLEVEL_NONE);
-	DEBUGGER_STACK_PUSH(_T("Gui"))
 
 	AddRef();
 	AddRef();
@@ -9043,10 +9104,19 @@ int GuiType::CustomCtrlWmNotify(GuiIndexType aControlIndex, LPNMHDR aNmHdr)
 	g->GuiEvent = 'N';
 	g->EventInfo = (DWORD_PTR) aNmHdr;
 	g_script.mLastScriptRest = g_script.mLastPeekTime = GetTickCount();
-	glabel->Execute();
-	int returnValue = (int)g_ErrorLevel->ToInt64(FALSE);
 
-	DEBUGGER_STACK_POP()
+	ExprTokenType param[3];
+	param[0].SetValue((size_t)aControl.hwnd);
+	param[1].SetValue(_T("N"));
+	param[2].SetValue((size_t)aNmHdr);
+
+	INT_PTR returnValue;
+	
+	glabel->ExecuteInNewThread(_T("Gui"), param, 3, &returnValue);
+	
+	if (glabel->ToLabel()) // It's a label, not a function or object.
+		returnValue = (INT_PTR)g_ErrorLevel->ToInt64(FALSE);
+
 	Release();
 	ResumeUnderlyingThread(ErrorLevel_saved);
 
