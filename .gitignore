@@ -1,7 +1,9 @@
 temp/
+exe/
 bin/
 ipch/
 *.suo
+*~
 *.user
 *.ncb
 *.aps
