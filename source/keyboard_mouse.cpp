@@ -629,9 +629,9 @@ void SendKeys(LPTSTR aKeys, bool aSendRaw, SendModes aSendModeOrig, HWND aTarget
 				{
 					// v1.0.40: SendKeySpecial sends only keybd_event keystrokes, not ControlSend style
 					// keystrokes.
-					// v1.0.43.07: Added check of event_type!=KEYUP, which causes something like Send {ð up} to
+					// v1.0.43.07: Added check of event_type!=KEYUP, which causes something like Send {?up} to
 					// do nothing if the curr. keyboard layout lacks such a key.  This is relied upon by remappings
-					// such as F1::ð (i.e. a destination key that doesn't have a VK, at least in English).
+					// such as F1::?(i.e. a destination key that doesn't have a VK, at least in English).
 					if (event_type != KEYUP) // In this mode, mods_for_next_key and event_type are ignored due to being unsupported.
 					{
 						if (aTargetWindow)
@@ -3307,7 +3307,7 @@ void SetModifierLRState(modLR_type aModifiersLRnew, modLR_type aModifiersLRnow, 
 			if (sTargetLayoutHasAltGr == CONDITION_TRUE) // Note that KeyEvent() might have just changed the value of sTargetLayoutHasAltGr.
 			{
 				// Indicate that control is both down and required down so that the section after this one won't
-				// release it.  Without this fix, a hotkey that sends an AltGr char such as "^ä:: SendRaw, {"
+				// release it.  Without this fix, a hotkey that sends an AltGr char such as "^?: SendRaw, {"
 				// would fail to work under German layout because left-alt would be released after right-alt
 				// goes down.
 				aModifiersLRnow |= MOD_LCONTROL; // To reflect what KeyEvent() did above.
