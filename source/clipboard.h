@@ -58,6 +58,7 @@ public:
 	bool IsReadyForWrite() {return mClipMemNewLocked != NULL;}
 
 	#define CLIPBOARD_FAILURE UINT_MAX
+	// define function here, it is implemented at clipboard.cpp
 	size_t Get(LPTSTR aBuf = NULL);
 
 	ResultType Set(LPCTSTR aBuf = NULL, UINT_PTR aLength = UINT_MAX);
